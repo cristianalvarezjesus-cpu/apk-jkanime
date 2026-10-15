@@ -363,12 +363,12 @@ class MainActivity : AppCompatActivity() {
                     if (enabled) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
                 )
             }
-        } catch (_: Throwable) {
+                } catch (e: Throwable) {
             // Si el WebView instalado no lo soporta, se ignora.
         }
     }
 
-    private fun setImmersive(enable: Boolean) {
+        override fun setImmersive(enable: Boolean) {
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         if (enable) {
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
