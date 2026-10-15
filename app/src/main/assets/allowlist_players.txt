@@ -1,0 +1,19 @@
+# Dominios de reproductores de video que NUNCA se bloquean (ni siquiera si aparecen en blocklist.txt),
+# y que se permiten en iframes cuando está activo el "Bloqueo estricto de iframes".
+#
+# OJO: esta lista es un punto de partida con servidores de video comunes en sitios de anime.
+# No sé qué reproductores usa el sitio en este momento. Si un episodio no carga:
+#   1) conecta el celular a la PC y abre chrome://inspect (necesita un APK debug),
+#   2) inspecciona el iframe del reproductor y copia su dominio,
+#   3) agrégalo aquí y vuelve a compilar.
+
+jkanime.net
+streamwish.to
+filemoon.sx
+mp4upload.com
+ok.ru
+voe.sx
+streamtape.com
+yourupload.com
+dailymotion.com
+mega.nz

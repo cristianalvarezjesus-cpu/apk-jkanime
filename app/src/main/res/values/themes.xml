@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tema oscuro fijo: permite además el "modo oscuro" opcional de la página -->
+    <style name="Theme.Visor" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/visor_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="colorAccent">@color/visor_accent</item>
+        <item name="colorPrimary">@color/visor_surface</item>
+        <item name="colorPrimaryDark">@color/visor_bg</item>
+    </style>
+</resources>
