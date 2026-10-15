@@ -61,8 +61,8 @@ class MainActivity : AppCompatActivity() {
     private var lastFailedUrl: String? = null
 
     /**
-     * Bloqueo adicional por URL/ruta, no sólo por host.
-     * Cubre rutas típicas de VAST/VPAID y banners que a veces viven en el mismo host.
+     * Bloqueo adicional por ruta. Sólo se aplica a hosts NO confiables
+     * (ver isTrusted en shouldInterceptRequest / shouldOverrideUrlLoading).
      */
     private val adPathRegex = Regex(
         """(^|[/._?&=-])(vast|vpaid|preroll|pre-roll|midroll|postroll|popunder|popup|interstitial|banner[0-9]*|adframe|adserver|advert)([/._?&=-]|$)""",
@@ -102,6 +102,7 @@ class MainActivity : AppCompatActivity() {
 
         adBlocker = AdBlocker(this)
         adBlocker.strictIframes = prefs.getBoolean(PREF_STRICT, false)
+        adBlocker.load()
         injectJs = assets.open("inject.js").bufferedReader().use { it.readText() }
 
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
@@ -131,12 +132,11 @@ class MainActivity : AppCompatActivity() {
         val s = webView.settings
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
-        s.mediaPlaybackRequiresUserGesture = true   // evita autoplay de video-ads
+        s.mediaPlaybackRequiresUserGesture = true
         s.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         s.allowFileAccess = false
         s.allowContentAccess = false
 
-        // Popups: por mucho que un sitio llame a window.open, no se crea otra ventana
         s.setSupportMultipleWindows(false)
         s.javaScriptCanOpenWindowsAutomatically = false
 
@@ -167,15 +167,13 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = webClient
         webView.webChromeClient = chromeClient
 
-        // --- CLAVE para que aparezca el teclado al tocar un input ---
+        // Foco para que aparezca el teclado al tocar inputs
         webView.isFocusable = true
         webView.isFocusableInTouchMode = true
         webView.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         webView.requestFocus(View.FOCUS_DOWN)
         webView.setOnTouchListener { v, _ ->
-            if (!v.hasFocus()) {
-                v.requestFocus(View.FOCUS_DOWN)
-            }
+            if (!v.hasFocus()) v.requestFocus(View.FOCUS_DOWN)
             false
         }
     }
@@ -190,8 +188,17 @@ class MainActivity : AppCompatActivity() {
             val host = url.host ?: return null
             val full = url.toString()
 
-            if (adBlocker.isBlockedHost(host)) return emptyResponse()
-            if (adPathRegex.containsMatchIn(full)) return emptyResponse()
+            // El sitio y sus reproductores son "trusted":
+            // no les aplicamos filtros por ruta (evita romper /buscar, /ajax, etc.)
+            val isTrusted = adBlocker.isSiteHost(host) ||
+                            adBlocker.isPlayerHost(host) ||
+                            adBlocker.isTrustedPath(full)
+
+            if (!isTrusted) {
+                if (adBlocker.isBlockedHost(host)) return emptyResponse()
+                if (adBlocker.isBlockedUrl(full)) return emptyResponse()
+                if (adPathRegex.containsMatchIn(full)) return emptyResponse()
+            }
 
             if (adBlocker.strictIframes && !request.isForMainFrame && isFrameRequest(request) &&
                 !adBlocker.isSiteHost(host) && !adBlocker.isPlayerHost(host)
@@ -213,9 +220,17 @@ class MainActivity : AppCompatActivity() {
 
             val host = uri.host ?: return true
 
-            // Bloqueo por host o por ruta (ads servidos desde el mismo dominio).
-            if (adBlocker.isBlockedHost(host) || adPathRegex.containsMatchIn(uri.toString())) {
-                return true
+            val trusted = adBlocker.isSiteHost(host) ||
+                          adBlocker.isPlayerHost(host) ||
+                          adBlocker.isTrustedPath(uri.toString())
+
+            if (!trusted) {
+                if (adBlocker.isBlockedHost(host) ||
+                    adBlocker.isBlockedUrl(uri.toString()) ||
+                    adPathRegex.containsMatchIn(uri.toString())
+                ) {
+                    return true
+                }
             }
 
             return if (request.isForMainFrame) {
@@ -235,6 +250,23 @@ class MainActivity : AppCompatActivity() {
             swipe.isRefreshing = false
             progress.visibility = View.GONE
             view.evaluateJavascript(injectJs, null)
+
+            // Cosmético + scriptlets específicos de esta URL
+            val css = adBlocker.cosmeticCssFor(url)
+            val scriptlets = adBlocker.scriptletsFor(url)
+            val scriptletsJson = scriptlets.joinToString(",", "[", "]") { jsString(it) }
+            val js = """
+                (function(){
+                  function apply(){
+                    if (window.__visorApply) {
+                      window.__visorApply(${jsString(css)}, $scriptletsJson);
+                    } else { setTimeout(apply, 50); }
+                  }
+                  apply();
+                })();
+            """.trimIndent()
+            view.evaluateJavascript(js, null)
+
             if (!view.hasFocus()) view.requestFocus(View.FOCUS_DOWN)
         }
 
@@ -266,7 +298,6 @@ class MainActivity : AppCompatActivity() {
             progress.visibility = if (newProgress >= 100) View.GONE else View.VISIBLE
         }
 
-        // Defensa doble: si el sistema intenta crear una ventana, se deniega.
         override fun onCreateWindow(
             view: WebView,
             isDialog: Boolean,
@@ -407,15 +438,12 @@ class MainActivity : AppCompatActivity() {
                     else WebSettingsCompat.FORCE_DARK_OFF
                 )
             }
-        } catch (_: Throwable) {
-            // Si el WebView instalado no lo soporta, se ignora.
-        }
+        } catch (_: Throwable) { }
     }
 
     /**
-     * Método propio. NOTA: no puede llamarse `setImmersive` porque
-     * AppCompatActivity ya expone un miembro con ese nombre (setter de
-     * la propiedad `immersive`) y Kotlin da error de compilación.
+     * NO se puede llamar `setImmersive` porque AppCompatActivity ya
+     * expone un miembro con ese nombre (setter de la propiedad `immersive`).
      */
     private fun applyImmersiveMode(enable: Boolean) {
         val controller = WindowInsetsControllerCompat(window, window.decorView)
@@ -429,6 +457,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ------------------------------------------------------------------ Utilidades
+
+    /** Escapa un String de Kotlin para incrustarlo en JavaScript con comillas. */
+    private fun jsString(s: String): String {
+        val sb = StringBuilder("\"")
+        for (c in s) {
+            when (c) {
+                '\\' -> sb.append("\\\\")
+                '"'  -> sb.append("\\\"")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                '\u2028' -> sb.append("\\u2028")
+                '\u2029' -> sb.append("\\u2029")
+                else -> if (c < ' ') sb.append("\\u%04x".format(c.code)) else sb.append(c)
+            }
+        }
+        sb.append("\"")
+        return sb.toString()
+    }
 
     private fun emptyResponse() =
         WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
@@ -447,15 +494,8 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ Ciclo de vida
 
-    override fun onPause() {
-        webView.onPause()
-        super.onPause()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        webView.onResume()
-    }
+    override fun onPause() { webView.onPause(); super.onPause() }
+    override fun onResume() { super.onResume(); webView.onResume() }
 
     override fun onDestroy() {
         (webView.parent as? ViewGroup)?.removeView(webView)
@@ -466,7 +506,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val HOME_URL = "https://jkanime.net/"
-
         private const val PREF_TEXT_ZOOM = "text_zoom"
         private const val PREF_DARK = "dark"
         private const val PREF_STRICT = "strict_iframes"
