@@ -131,7 +131,7 @@ class MainActivity : AppCompatActivity() {
         val s = webView.settings
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
-        s.mediaPlaybackRequiresUserGesture = true   // <- mantiene bloqueados los video-ads con autoplay
+        s.mediaPlaybackRequiresUserGesture = true   // evita autoplay de video-ads
         s.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         s.allowFileAccess = false
         s.allowContentAccess = false
@@ -167,12 +167,11 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = webClient
         webView.webChromeClient = chromeClient
 
-        // --- CLAVE para el teclado ---
+        // --- CLAVE para que aparezca el teclado al tocar un input ---
         webView.isFocusable = true
         webView.isFocusableInTouchMode = true
         webView.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         webView.requestFocus(View.FOCUS_DOWN)
-        // Si el usuario toca cualquier input, que el WebView se asegure el foco.
         webView.setOnTouchListener { v, _ ->
             if (!v.hasFocus()) {
                 v.requestFocus(View.FOCUS_DOWN)
@@ -214,16 +213,14 @@ class MainActivity : AppCompatActivity() {
 
             val host = uri.host ?: return true
 
-            // Bloqueo por host o por ruta (cubre ads servidos desde el mismo dominio).
+            // Bloqueo por host o por ruta (ads servidos desde el mismo dominio).
             if (adBlocker.isBlockedHost(host) || adPathRegex.containsMatchIn(uri.toString())) {
                 return true
             }
 
             return if (request.isForMainFrame) {
-                // Permite misma web y sus reproductores; bloquea el resto de redirecciones.
                 !(adBlocker.isSiteHost(host) || adBlocker.isPlayerHost(host))
             } else {
-                // Subframe: bloquea solo si es claramente publicitario.
                 adBlocker.isBlockedHost(host)
             }
         }
@@ -238,7 +235,6 @@ class MainActivity : AppCompatActivity() {
             swipe.isRefreshing = false
             progress.visibility = View.GONE
             view.evaluateJavascript(injectJs, null)
-            // Reafirmar foco tras cada carga (algunos sitios roban el foco al body).
             if (!view.hasFocus()) view.requestFocus(View.FOCUS_DOWN)
         }
 
@@ -270,7 +266,7 @@ class MainActivity : AppCompatActivity() {
             progress.visibility = if (newProgress >= 100) View.GONE else View.VISIBLE
         }
 
-        // Defensa doble: si por lo que sea el sistema intenta crear una ventana, se deniega.
+        // Defensa doble: si el sistema intenta crear una ventana, se deniega.
         override fun onCreateWindow(
             view: WebView,
             isDialog: Boolean,
@@ -307,7 +303,7 @@ class MainActivity : AppCompatActivity() {
             fullscreenContainer.visibility = View.VISIBLE
             contentRoot.visibility = View.INVISIBLE
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            setImmersive(true)
+            applyImmersiveMode(true)
         }
 
         override fun onHideCustomView() {
@@ -319,7 +315,7 @@ class MainActivity : AppCompatActivity() {
             customViewCallback?.onCustomViewHidden()
             customViewCallback = null
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            setImmersive(pageImmersive)
+            applyImmersiveMode(pageImmersive)
         }
 
         override fun getDefaultVideoPoster(): Bitmap =
@@ -373,7 +369,7 @@ class MainActivity : AppCompatActivity() {
                 MENU_ZOOM_OUT -> webView.zoomOut()
                 MENU_FULLSCREEN -> {
                     pageImmersive = !pageImmersive
-                    setImmersive(pageImmersive)
+                    applyImmersiveMode(pageImmersive)
                 }
                 MENU_DARK -> {
                     val enabled = !item.isChecked
@@ -412,11 +408,16 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         } catch (_: Throwable) {
+            // Si el WebView instalado no lo soporta, se ignora.
         }
     }
 
-    // OJO: aquí quitamos 'override' (era un error). Es un método propio.
-    private fun setImmersive(enable: Boolean) {
+    /**
+     * Método propio. NOTA: no puede llamarse `setImmersive` porque
+     * AppCompatActivity ya expone un miembro con ese nombre (setter de
+     * la propiedad `immersive`) y Kotlin da error de compilación.
+     */
+    private fun applyImmersiveMode(enable: Boolean) {
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         if (enable) {
             controller.systemBarsBehavior =
@@ -444,8 +445,17 @@ class MainActivity : AppCompatActivity() {
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
-    override fun onPause() { webView.onPause(); super.onPause() }
-    override fun onResume() { super.onResume(); webView.onResume() }
+    // ------------------------------------------------------------------ Ciclo de vida
+
+    override fun onPause() {
+        webView.onPause()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        webView.onResume()
+    }
 
     override fun onDestroy() {
         (webView.parent as? ViewGroup)?.removeView(webView)
@@ -456,6 +466,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val HOME_URL = "https://jkanime.net/"
+
         private const val PREF_TEXT_ZOOM = "text_zoom"
         private const val PREF_DARK = "dark"
         private const val PREF_STRICT = "strict_iframes"
