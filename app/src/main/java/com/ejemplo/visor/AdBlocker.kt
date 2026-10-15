@@ -100,7 +100,7 @@ class AdBlocker(private val context: Context) {
         var line = raw.trim()
         if (line.isEmpty() || line.startsWith("!")) return
         if (line.length > 400) return
-        if (line.contains("$csp=") || line.contains("$replace=")) return
+        if (line.contains("\$csp=") || line.contains("\$replace=")) return
 
         var isException = false
         if (line.startsWith("@@")) { isException = true; line = line.substring(2) }
