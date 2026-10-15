@@ -3,10 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Si el workflow de GitHub Actions entrega un keystore (vía Secrets), se firma el release con él.
-val ciKeystorePath: String? = System.getenv("KEYSTORE_PATH")
-val hasCiKeystore: Boolean = ciKeystorePath != null && file(ciKeystorePath).exists()
-
 android {
     namespace = "com.ejemplo.visor"
     compileSdk = 34
@@ -17,16 +13,9 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-    }
 
-    signingConfigs {
-        if (hasCiKeystore) {
-            create("release") {
-                storeFile = file(ciKeystorePath!!)
-                storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
-                keyPassword = System.getenv("KEY_PASSWORD")
-            }
+        vectorDrawables {
+            useSupportLibrary = true
         }
     }
 
@@ -37,9 +26,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            if (hasCiKeystore) {
-                signingConfig = signingConfigs.getByName("release")
-            }
         }
     }
 
@@ -51,11 +37,30 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    buildFeatures {
+        viewBinding = false
+    }
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0")
+    // AndroidX core
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.activity:activity-ktx:1.8.2")
+
+    // Material Design
+    implementation("com.google.android.material:material:1.11.0")
+
+    // ConstraintLayout (por si lo usas en layouts)
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+
+    // WebView moderno (DOCUMENT_START_SCRIPT, ALGORITHMIC_DARKENING, etc.)
+    implementation("androidx.webkit:webkit:1.10.0")
+
+    // Pull to refresh
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
-    implementation("androidx.webkit:webkit:1.11.0")
+
+    // Corrutinas (opcional pero útil)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }
