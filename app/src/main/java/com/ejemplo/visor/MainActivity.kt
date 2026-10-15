@@ -12,6 +12,8 @@ import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.CookieManager
+import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
@@ -21,8 +23,6 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.JsPromptResult
-import android.webkit.CookieManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.PopupMenu
@@ -60,15 +60,25 @@ class MainActivity : AppCompatActivity() {
     private var docStartInstalled = false
     private var lastFailedUrl: String? = null
 
-    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
+    /**
+     * Bloqueo adicional por URL/ruta, no sólo por host.
+     * Cubre rutas típicas de VAST/VPAID y banners que a veces viven en el mismo host.
+     */
+    private val adPathRegex = Regex(
+        """(^|[/._?&=-])(vast|vpaid|preroll|pre-roll|midroll|postroll|popunder|popup|interstitial|banner[0-9]*|adframe|adserver|advert)([/._?&=-]|$)""",
+        RegexOption.IGNORE_CASE
+    )
+
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Edge-to-edge + soporte para notch
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         if (Build.VERSION.SDK_INT >= 28) {
             val lp = window.attributes
-            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            lp.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             window.attributes = lp
         }
 
@@ -95,7 +105,7 @@ class MainActivity : AppCompatActivity() {
         injectJs = assets.open("inject.js").bufferedReader().use { it.readText() }
 
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-            WebView.setWebContentsDebuggingEnabled(true) // chrome://inspect solo en builds debug
+            WebView.setWebContentsDebuggingEnabled(true)
         }
 
         setupWebView()
@@ -121,16 +131,15 @@ class MainActivity : AppCompatActivity() {
         val s = webView.settings
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
-        s.mediaPlaybackRequiresUserGesture = true
+        s.mediaPlaybackRequiresUserGesture = true   // <- mantiene bloqueados los video-ads con autoplay
         s.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         s.allowFileAccess = false
         s.allowContentAccess = false
 
-        // Sin ventanas emergentes
+        // Popups: por mucho que un sitio llame a window.open, no se crea otra ventana
         s.setSupportMultipleWindows(false)
         s.javaScriptCanOpenWindowsAutomatically = false
 
-        // Zoom con pellizco (sin controles en pantalla)
         s.setSupportZoom(true)
         s.builtInZoomControls = true
         s.displayZoomControls = false
@@ -138,7 +147,6 @@ class MainActivity : AppCompatActivity() {
         s.loadWithOverviewMode = true
         s.textZoom = prefs.getInt(PREF_TEXT_ZOOM, 100)
 
-        // User-Agent de Chrome móvil, derivado del WebView instalado (no queda desactualizado)
         s.userAgentString = s.userAgentString
             .replace("; wv", "")
             .replace(Regex("Version/\\d+\\.\\d+ "), "")
@@ -150,25 +158,41 @@ class MainActivity : AppCompatActivity() {
 
         applyDarkMode(prefs.getBoolean(PREF_DARK, false))
 
-        // Script anti-anuncios al inicio de cada documento, incluidos los iframes
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             WebViewCompat.addDocumentStartJavaScript(webView, injectJs, setOf("*"))
             docStartInstalled = true
         }
 
-        // Descargas deshabilitadas
         webView.setDownloadListener { _, _, _, _, _ -> }
-
         webView.webViewClient = webClient
         webView.webChromeClient = chromeClient
+
+        // --- CLAVE para el teclado ---
+        webView.isFocusable = true
+        webView.isFocusableInTouchMode = true
+        webView.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        webView.requestFocus(View.FOCUS_DOWN)
+        // Si el usuario toca cualquier input, que el WebView se asegure el foco.
+        webView.setOnTouchListener { v, _ ->
+            if (!v.hasFocus()) {
+                v.requestFocus(View.FOCUS_DOWN)
+            }
+            false
+        }
     }
 
     private val webClient = object : WebViewClient() {
 
-        /** Cancela las peticiones a dominios de publicidad. */
-        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-            val host = request.url.host
+        override fun shouldInterceptRequest(
+            view: WebView,
+            request: WebResourceRequest
+        ): WebResourceResponse? {
+            val url = request.url
+            val host = url.host ?: return null
+            val full = url.toString()
+
             if (adBlocker.isBlockedHost(host)) return emptyResponse()
+            if (adPathRegex.containsMatchIn(full)) return emptyResponse()
 
             if (adBlocker.strictIframes && !request.isForMainFrame && isFrameRequest(request) &&
                 !adBlocker.isSiteHost(host) && !adBlocker.isPlayerHost(host)
@@ -178,17 +202,29 @@ class MainActivity : AppCompatActivity() {
             return null
         }
 
-        /** Solo se navega dentro del sitio. Todo lo demás (otros dominios, intent://, market://...) se bloquea. */
-        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+        override fun shouldOverrideUrlLoading(
+            view: WebView,
+            request: WebResourceRequest
+        ): Boolean {
             val uri = request.url
-            val scheme = uri.scheme?.lowercase()
-            if (scheme == "about") return false
+            val scheme = uri.scheme?.lowercase() ?: return true
+
+            if (scheme == "about" || scheme == "data" || scheme == "blob") return false
             if (scheme != "http" && scheme != "https") return true
 
+            val host = uri.host ?: return true
+
+            // Bloqueo por host o por ruta (cubre ads servidos desde el mismo dominio).
+            if (adBlocker.isBlockedHost(host) || adPathRegex.containsMatchIn(uri.toString())) {
+                return true
+            }
+
             return if (request.isForMainFrame) {
-                !adBlocker.isSiteHost(uri.host)
+                // Permite misma web y sus reproductores; bloquea el resto de redirecciones.
+                !(adBlocker.isSiteHost(host) || adBlocker.isPlayerHost(host))
             } else {
-                adBlocker.isBlockedHost(uri.host)
+                // Subframe: bloquea solo si es claramente publicitario.
+                adBlocker.isBlockedHost(host)
             }
         }
 
@@ -201,17 +237,27 @@ class MainActivity : AppCompatActivity() {
         override fun onPageFinished(view: WebView, url: String?) {
             swipe.isRefreshing = false
             progress.visibility = View.GONE
-            view.evaluateJavascript(injectJs, null) // refuerzo; el script se protege contra doble ejecución
+            view.evaluateJavascript(injectJs, null)
+            // Reafirmar foco tras cada carga (algunos sitios roban el foco al body).
+            if (!view.hasFocus()) view.requestFocus(View.FOCUS_DOWN)
         }
 
-        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+        override fun onReceivedError(
+            view: WebView,
+            request: WebResourceRequest,
+            error: WebResourceError
+        ) {
             if (!request.isForMainFrame) return
             lastFailedUrl = request.url.toString()
-            errorText.text = if (isOnline()) "No se pudo cargar la página." else "Sin conexión a internet."
+            errorText.text =
+                if (isOnline()) "No se pudo cargar la página." else "Sin conexión a internet."
             errorView.visibility = View.VISIBLE
         }
 
-        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        override fun onRenderProcessGone(
+            view: WebView,
+            detail: RenderProcessGoneDetail
+        ): Boolean {
             recreate()
             return true
         }
@@ -224,12 +270,14 @@ class MainActivity : AppCompatActivity() {
             progress.visibility = if (newProgress >= 100) View.GONE else View.VISIBLE
         }
 
-        // Ventanas emergentes: nunca se crean
+        // Defensa doble: si por lo que sea el sistema intenta crear una ventana, se deniega.
         override fun onCreateWindow(
-            view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?
+            view: WebView,
+            isDialog: Boolean,
+            isUserGesture: Boolean,
+            resultMsg: android.os.Message?
         ): Boolean = false
 
-        // Diálogos JavaScript: se cancelan
         override fun onJsAlert(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
             result.cancel(); return true
         }
@@ -239,22 +287,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onJsPrompt(
-            view: WebView, url: String?, message: String?, defaultValue: String?, result: JsPromptResult
+            view: WebView, url: String?, message: String?,
+            defaultValue: String?, result: JsPromptResult
         ): Boolean {
             result.cancel(); return true
         }
 
-        // Video a pantalla completa
         override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-            if (customView != null) {
-                callback.onCustomViewHidden()
-                return
-            }
+            if (customView != null) { callback.onCustomViewHidden(); return }
             customView = view
             customViewCallback = callback
             fullscreenContainer.addView(
                 view,
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
             )
             fullscreenContainer.visibility = View.VISIBLE
             contentRoot.visibility = View.INVISIBLE
@@ -274,7 +322,6 @@ class MainActivity : AppCompatActivity() {
             setImmersive(pageImmersive)
         }
 
-        // Evita un NullPointerException en algunas versiones de WebView
         override fun getDefaultVideoPoster(): Bitmap =
             Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
     }
@@ -285,7 +332,6 @@ class MainActivity : AppCompatActivity() {
         swipe.setColorSchemeResources(R.color.visor_accent)
         swipe.setProgressBackgroundColorSchemeResource(R.color.visor_surface)
         swipe.setOnRefreshListener { webView.reload() }
-        // Solo permite "tirar para recargar" cuando la página está arriba del todo
         swipe.setOnChildScrollUpCallback { _, _ -> webView.scrollY > 0 }
 
         findViewById<Button>(R.id.retryButton).setOnClickListener {
@@ -306,7 +352,8 @@ class MainActivity : AppCompatActivity() {
         m.add(0, MENU_TEXT_DOWN, 3, "Texto más pequeño")
         m.add(0, MENU_ZOOM_IN, 4, "Acercar (zoom +)")
         m.add(0, MENU_ZOOM_OUT, 5, "Alejar (zoom −)")
-        m.add(0, MENU_FULLSCREEN, 6, if (pageImmersive) "Salir de pantalla completa" else "Pantalla completa")
+        m.add(0, MENU_FULLSCREEN, 6,
+            if (pageImmersive) "Salir de pantalla completa" else "Pantalla completa")
         m.add(0, MENU_DARK, 7, "Modo oscuro de la página").apply {
             isCheckable = true
             isChecked = prefs.getBoolean(PREF_DARK, false)
@@ -360,18 +407,20 @@ class MainActivity : AppCompatActivity() {
                 @Suppress("DEPRECATION")
                 WebSettingsCompat.setForceDark(
                     settings,
-                    if (enabled) WebSettingsCompat.FORCE_DARK_ON else WebSettingsCompat.FORCE_DARK_OFF
+                    if (enabled) WebSettingsCompat.FORCE_DARK_ON
+                    else WebSettingsCompat.FORCE_DARK_OFF
                 )
             }
-                } catch (e: Throwable) {
-            // Si el WebView instalado no lo soporta, se ignora.
+        } catch (_: Throwable) {
         }
     }
 
-        override fun setImmersive(enable: Boolean) {
+    // OJO: aquí quitamos 'override' (era un error). Es un método propio.
+    private fun setImmersive(enable: Boolean) {
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         if (enable) {
-            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
@@ -385,7 +434,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun isFrameRequest(request: WebResourceRequest): Boolean {
         val h = request.requestHeaders
-        return h["Sec-Fetch-Dest"] == "iframe" || h["Accept"]?.contains("text/html") == true
+        return h["Sec-Fetch-Dest"] == "iframe" ||
+                h["Accept"]?.contains("text/html") == true
     }
 
     private fun isOnline(): Boolean {
@@ -394,17 +444,8 @@ class MainActivity : AppCompatActivity() {
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
-    // ------------------------------------------------------------------ Ciclo de vida
-
-    override fun onPause() {
-        webView.onPause()
-        super.onPause()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        webView.onResume()
-    }
+    override fun onPause() { webView.onPause(); super.onPause() }
+    override fun onResume() { super.onResume(); webView.onResume() }
 
     override fun onDestroy() {
         (webView.parent as? ViewGroup)?.removeView(webView)
@@ -415,7 +456,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val HOME_URL = "https://jkanime.net/"
-
         private const val PREF_TEXT_ZOOM = "text_zoom"
         private const val PREF_DARK = "dark"
         private const val PREF_STRICT = "strict_iframes"
